@@ -64,26 +64,37 @@ class NetBox:
         return {str(item): item for item in self.netbox.dcim.manufacturers.all()}
 
     def create_manufacturers(self, vendors):
-        to_create = []
+        # Get existing manufacturers (name + slug)
         self.existing_manufacturers = self.get_manufacturers()
-        for vendor in vendors:
-            try:
-                manGet = self.existing_manufacturers[vendor["name"]]
-                self.handle.verbose_log(f'Manufacturer Exists: {manGet.name} - {manGet.id}')
-            except KeyError:
-                to_create.append(vendor)
-                self.handle.verbose_log(f"Manufacturer queued for addition: {vendor['name']}")
+        existing_slugs = {item.slug for item in self.existing_manufacturers.values()}
+        existing_names = {item.name for item in self.existing_manufacturers.values()}
 
+        to_create = []
+
+        for vendor in vendors:
+            # Ensure slug is set
+            vendor.setdefault('slug', vendor['name'].lower().replace(' ', '-'))
+
+            # Check existence by name or slug
+            if vendor["name"] in existing_names or vendor["slug"] in existing_slugs:
+                self.handle.verbose_log(f'Manufacturer Exists: {vendor["name"]} (slug: {vendor["slug"]})')
+            else:
+                to_create.append(vendor)
+                self.handle.verbose_log(f"Manufacturer queued for addition: {vendor['name']} (slug: {vendor['slug']})")
+
+        # Only if there are manufacturers to create → API call
         if to_create:
+            self.handle.log(f"Creating {len(to_create)} new manufacturers...")
             try:
                 created_manufacturers = self.netbox.dcim.manufacturers.create(to_create)
                 for manufacturer in created_manufacturers:
-                    self.handle.verbose_log(f'Manufacturer Created: {manufacturer.name} - '
-                        + f'{manufacturer.id}')
+                    self.handle.verbose_log(f'Manufacturer Created: {manufacturer.name} - {manufacturer.id}')
                     self.counter.update({'manufacturer': 1})
             except pynetbox.RequestError as request_error:
-                self.handle.log("Error creating manufacturers")
-                self.handle.verbose_log(f"Error during manufacturer creation. - {request_error.error}")
+                # Log error with detailed API error message
+                self.handle.log(f"Error creating manufacturers: {request_error.error}")
+        else:
+            self.handle.log("No new manufacturers to create.")
 
     def create_device_types(self, device_types_to_add):
         for device_type in device_types_to_add:
