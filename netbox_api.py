@@ -24,10 +24,11 @@ class NetBox:
         self.netbox = None
         self.ignore_ssl = settings.IGNORE_SSL_ERRORS
         self.modules = False
+        self.new_filters = False
         self.connect_api()
         self.verify_compatibility()
         self.existing_manufacturers = self.get_manufacturers()
-        self.device_types = DeviceTypes(self.netbox, self.handle, self.counter, self.ignore_ssl)
+        self.device_types = DeviceTypes(self.netbox, self.handle, self.counter, self.ignore_ssl, self.new_filters)
 
     def connect_api(self):
         try:
@@ -54,30 +55,46 @@ class NetBox:
         if version_split[0] > 3 or (version_split[0] == 3 and version_split[1] >= 2):
             self.modules = True
 
+        # check if version >= 4.1 in order to use new filter names (https://github.com/netbox-community/netbox/issues/15410)
+        if version_split[0] >= 4 and version_split[1] >= 1:
+            self.new_filters = True
+            self.handle.log(f'Netbox version {self.netbox.version} found. Using new filters.')
+    
     def get_manufacturers(self):
         return {str(item): item for item in self.netbox.dcim.manufacturers.all()}
 
     def create_manufacturers(self, vendors):
-        to_create = []
+        # Get existing manufacturers (name + slug)
         self.existing_manufacturers = self.get_manufacturers()
-        for vendor in vendors:
-            try:
-                manGet = self.existing_manufacturers[vendor["name"]]
-                self.handle.verbose_log(f'Manufacturer Exists: {manGet.name} - {manGet.id}')
-            except KeyError:
-                to_create.append(vendor)
-                self.handle.verbose_log(f"Manufacturer queued for addition: {vendor['name']}")
+        existing_slugs = {item.slug for item in self.existing_manufacturers.values()}
+        existing_names = {item.name for item in self.existing_manufacturers.values()}
 
+        to_create = []
+
+        for vendor in vendors:
+            # Ensure slug is set
+            vendor.setdefault('slug', vendor['name'].lower().replace(' ', '-'))
+
+            # Check existence by name or slug
+            if vendor["name"] in existing_names or vendor["slug"] in existing_slugs:
+                self.handle.verbose_log(f'Manufacturer Exists: {vendor["name"]} (slug: {vendor["slug"]})')
+            else:
+                to_create.append(vendor)
+                self.handle.verbose_log(f"Manufacturer queued for addition: {vendor['name']} (slug: {vendor['slug']})")
+
+        # Only if there are manufacturers to create → API call
         if to_create:
+            self.handle.log(f"Creating {len(to_create)} new manufacturers...")
             try:
                 created_manufacturers = self.netbox.dcim.manufacturers.create(to_create)
                 for manufacturer in created_manufacturers:
-                    self.handle.verbose_log(f'Manufacturer Created: {manufacturer.name} - '
-                        + f'{manufacturer.id}')
+                    self.handle.verbose_log(f'Manufacturer Created: {manufacturer.name} - {manufacturer.id}')
                     self.counter.update({'manufacturer': 1})
             except pynetbox.RequestError as request_error:
-                self.handle.log("Error creating manufacturers")
-                self.handle.verbose_log(f"Error during manufacturer creation. - {request_error.error}")
+                # Log error with detailed API error message
+                self.handle.log(f"Error creating manufacturers: {request_error.error}")
+        else:
+            self.handle.log("No new manufacturers to create.")
 
     def create_device_types(self, device_types_to_add):
         for device_type in device_types_to_add:
@@ -183,27 +200,28 @@ class DeviceTypes:
     def __new__(cls, *args, **kwargs):
         return super().__new__(cls)
 
-    def __init__(self, netbox, handle, counter, ignore_ssl):
+    def __init__(self, netbox, handle, counter, ignore_ssl, new_filters):
         self.netbox = netbox
         self.handle = handle
         self.counter = counter
         self.existing_device_types = self.get_device_types()
         self.ignore_ssl = ignore_ssl
+        self.new_filters = new_filters
 
     def get_device_types(self):
         return {str(item): item for item in self.netbox.dcim.device_types.all()}
 
     def get_power_ports(self, device_type):
-        return {str(item): item for item in self.netbox.dcim.power_port_templates.filter(devicetype_id=device_type)}
-
+        return {str(item): item for item in self.netbox.dcim.power_port_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
+      
     def get_rear_ports(self, device_type):
-        return {str(item): item for item in self.netbox.dcim.rear_port_templates.filter(devicetype_id=device_type)}
+        return {str(item): item for item in self.netbox.dcim.rear_port_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
 
     def get_module_power_ports(self, module_type):
-        return {str(item): item for item in self.netbox.dcim.power_port_templates.filter(moduletype_id=module_type)}
+        return {str(item): item for item in self.netbox.dcim.power_port_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
 
     def get_module_rear_ports(self, module_type):
-        return {str(item): item for item in self.netbox.dcim.rear_port_templates.filter(moduletype_id=module_type)}
+        return {str(item): item for item in self.netbox.dcim.rear_port_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
 
     def get_device_type_ports_to_create(self, dcim_ports, device_type, existing_ports):
         to_create = [port for port in dcim_ports if port['name'] not in existing_ports]
@@ -221,7 +239,7 @@ class DeviceTypes:
 
     def create_interfaces(self, interfaces, device_type):
         existing_interfaces = {str(item): item for item in self.netbox.dcim.interface_templates.filter(
-            devicetype_id=device_type)}
+            **{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(
             interfaces, device_type, existing_interfaces)
 
@@ -248,7 +266,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Power Port")
 
     def create_console_ports(self, console_ports, device_type):
-        existing_console_ports = {str(item): item for item in self.netbox.dcim.console_port_templates.filter(devicetype_id=device_type)}
+        existing_console_ports = {str(item): item for item in self.netbox.dcim.console_port_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(console_ports, device_type, existing_console_ports)
 
         if to_create:
@@ -261,7 +279,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Console Port")
 
     def create_power_outlets(self, power_outlets, device_type):
-        existing_power_outlets = {str(item): item for item in self.netbox.dcim.power_outlet_templates.filter(devicetype_id=device_type)}
+        existing_power_outlets = {str(item): item for item in self.netbox.dcim.power_outlet_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(power_outlets, device_type, existing_power_outlets)
 
         if to_create:
@@ -282,7 +300,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Power Outlet")
 
     def create_console_server_ports(self, console_server_ports, device_type):
-        existing_console_server_ports = {str(item): item for item in self.netbox.dcim.console_server_port_templates.filter(devicetype_id=device_type)}
+        existing_console_server_ports = {str(item): item for item in self.netbox.dcim.console_server_port_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(console_server_ports, device_type, existing_console_server_ports)
 
         if to_create:
@@ -308,7 +326,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Rear Port")
 
     def create_front_ports(self, front_ports, device_type):
-        existing_front_ports = {str(item): item for item in self.netbox.dcim.front_port_templates.filter(devicetype_id=device_type)}
+        existing_front_ports = {str(item): item for item in self.netbox.dcim.front_port_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(front_ports, device_type, existing_front_ports)
 
         if to_create:
@@ -330,7 +348,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Front Port")
 
     def create_device_bays(self, device_bays, device_type):
-        existing_device_bays = {str(item): item for item in self.netbox.dcim.device_bay_templates.filter(devicetype_id=device_type)}
+        existing_device_bays = {str(item): item for item in self.netbox.dcim.device_bay_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(device_bays, device_type, existing_device_bays)
 
         if to_create:
@@ -343,7 +361,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Device Bay")
 
     def create_module_bays(self, module_bays, device_type):
-        existing_module_bays = {str(item): item for item in self.netbox.dcim.module_bay_templates.filter(devicetype_id=device_type)}
+        existing_module_bays = {str(item): item for item in self.netbox.dcim.module_bay_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
         to_create = self.get_device_type_ports_to_create(module_bays, device_type, existing_module_bays)
 
         if to_create:
@@ -356,7 +374,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Module Bay")
 
     def create_module_interfaces(self, module_interfaces, module_type):
-        existing_interfaces = {str(item): item for item in self.netbox.dcim.interface_templates.filter(moduletype_id=module_type)}
+        existing_interfaces = {str(item): item for item in self.netbox.dcim.interface_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
         to_create = self.get_module_type_ports_to_create(module_interfaces, module_type, existing_interfaces)
 
         if to_create:
@@ -382,7 +400,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Module Power Port")
 
     def create_module_console_ports(self, console_ports, module_type):
-        existing_console_ports = {str(item): item for item in self.netbox.dcim.console_port_templates.filter(moduletype_id=module_type)}
+        existing_console_ports = {str(item): item for item in self.netbox.dcim.console_port_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
         to_create = self.get_module_type_ports_to_create(console_ports, module_type, existing_console_ports)
 
         if to_create:
@@ -395,7 +413,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Module Console Port")
 
     def create_module_power_outlets(self, power_outlets, module_type):
-        existing_power_outlets = {str(item): item for item in self.netbox.dcim.power_outlet_templates.filter(moduletype_id=module_type)}
+        existing_power_outlets = {str(item): item for item in self.netbox.dcim.power_outlet_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
         to_create = self.get_module_type_ports_to_create(power_outlets, module_type, existing_power_outlets)
 
         if to_create:
@@ -416,7 +434,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Module Power Outlet")
 
     def create_module_console_server_ports(self, console_server_ports, module_type):
-        existing_console_server_ports = {str(item): item for item in self.netbox.dcim.console_server_port_templates.filter(moduletype_id=module_type)}
+        existing_console_server_ports = {str(item): item for item in self.netbox.dcim.console_server_port_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
         to_create = self.get_module_type_ports_to_create(console_server_ports, module_type, existing_console_server_ports)
 
         if to_create:
@@ -442,7 +460,7 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Module Rear Port")
 
     def create_module_front_ports(self, front_ports, module_type):
-        existing_front_ports = {str(item): item for item in self.netbox.dcim.front_port_templates.filter(moduletype_id=module_type)}
+        existing_front_ports = {str(item): item for item in self.netbox.dcim.front_port_templates.filter(**{'module_type_id' if self.new_filters else 'moduletype_id': module_type})}
         to_create = self.get_module_type_ports_to_create(front_ports, module_type, existing_front_ports)
 
         if to_create:
