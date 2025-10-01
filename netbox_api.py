@@ -24,7 +24,7 @@ class NetBox:
         self.netbox = None
         self.ignore_ssl = settings.IGNORE_SSL_ERRORS
         self.modules = False
-        self.new_filters = False
+        self.new_filters = settings.NEW_FILTERS
         self.connect_api()
         self.verify_compatibility()
         self.existing_manufacturers = self.get_manufacturers()
@@ -266,7 +266,13 @@ class DeviceTypes:
                 self.handle.log(f"Error '{excep.error}' creating Power Port")
 
     def create_console_ports(self, console_ports, device_type):
-        existing_console_ports = {str(item): item for item in self.netbox.dcim.console_port_templates.filter(**{'device_type_id' if self.new_filters else 'devicetype_id': device_type})}
+        existing_console_ports = {
+            str(item): item 
+            for item in self.netbox.dcim.console_port_templates.filter(
+                **{'device_type_id' if self.new_filters else 'devicetype_id': device_type}
+                )
+            }
+
         to_create = self.get_device_type_ports_to_create(console_ports, device_type, existing_console_ports)
 
         if to_create:

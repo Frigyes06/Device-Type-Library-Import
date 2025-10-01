@@ -10,6 +10,7 @@ REPO_URL = os.getenv("REPO_URL",
 REPO_BRANCH = os.getenv("REPO_BRANCH", default="master")
 NETBOX_URL = os.getenv("NETBOX_URL")
 NETBOX_TOKEN = os.getenv("NETBOX_TOKEN")
+NEW_FILTERS = os.getenv("NEW_FILTERS", default="True")
 IGNORE_SSL_ERRORS = (os.getenv("IGNORE_SSL_ERRORS", default="False") == "True")
 REPO_PATH = f"{os.path.dirname(os.path.realpath(__file__))}/repo"
 
