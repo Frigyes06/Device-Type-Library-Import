@@ -1,9 +1,29 @@
 from collections import Counter
 import pynetbox
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import os
 import glob
 # from pynetbox import RequestError as APIRequestError
+
+session = requests.Session()
+session.headers.update({"Connection": "close"})  # avoid flaky keep-alives
+
+# Gentle retries for transient disconnects/timeouts from proxy/gunicorn
+adapter = HTTPAdapter(max_retries=Retry(
+    total=5,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=frozenset(["GET", "POST", "PATCH", "DELETE"])
+))
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
+# Optional: keep page sizes modest globally
+session.params = {"limit": 100}
+
+
 
 class NetBox:
     def __new__(cls, *args, **kwargs):
@@ -33,9 +53,10 @@ class NetBox:
     def connect_api(self):
         try:
             self.netbox = pynetbox.api(self.url, token=self.token)
+            self.netbox.http_session = session
             if self.ignore_ssl:
                 self.handle.verbose_log("IGNORE_SSL_ERRORS is True, catching exception and disabling SSL verification.")
-                #requests.packages.urllib3.disable_warnings()
+                requests.packages.urllib3.disable_warnings()
                 self.netbox.http_session.verify = False
         except Exception as e:
             self.handle.exception("Exception", 'NetBox API Error', e)
